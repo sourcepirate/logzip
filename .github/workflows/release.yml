@@ -1,0 +1,115 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Run tests
+        run: go test ./... -timeout 60s
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - { goos: linux,   goarch: amd64, ext: '' }
+          - { goos: linux,   goarch: arm64, ext: '' }
+          - { goos: darwin,  goarch: amd64, ext: '' }
+          - { goos: darwin,  goarch: arm64, ext: '' }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.target.goos }}
+          GOARCH: ${{ matrix.target.goarch }}
+        run: |
+          BINARY="logzip-${GOOS}-${GOARCH}${{ matrix.target.ext }}"
+          go build -o "$BINARY" -ldflags="-s -w" ./cmd/logzip/
+          echo "binary=$BINARY" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: logzip-${{ matrix.target.goos }}-${{ matrix.target.goarch }}
+          path: logzip-*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum logzip-* > checksums.txt
+          ls -la
+
+      - name: Create/Update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: latest
+          body: |
+            # logzip latest
+
+            Auto-built from `main` branch.
+
+            ## Platforms
+            - linux/amd64
+            - linux/arm64
+            - darwin/amd64
+            - darwin/arm64
+
+            ## Install
+            ```bash
+            # macOS ARM (Apple Silicon)
+            curl -L -o /usr/local/bin/logzip https://github.com/${{ github.repository }}/releases/download/latest/logzip-darwin-arm64
+            chmod +x /usr/local/bin/logzip
+
+            # macOS Intel
+            curl -L -o /usr/local/bin/logzip https://github.com/${{ github.repository }}/releases/download/latest/logzip-darwin-amd64
+            chmod +x /usr/local/bin/logzip
+
+            # Linux AMD64
+            curl -L -o /usr/local/bin/logzip https://github.com/${{ github.repository }}/releases/download/latest/logzip-linux-amd64
+            chmod +x /usr/local/bin/logzip
+
+            # Linux ARM64
+            curl -L -o /usr/local/bin/logzip https://github.com/${{ github.repository }}/releases/download/latest/logzip-linux-arm64
+            chmod +x /usr/local/bin/logzip
+            ```
+          files: |
+            artifacts/logzip-*
+            artifacts/checksums.txt
+          prerelease: true
+          make_latest: true
