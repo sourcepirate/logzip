@@ -18,11 +18,11 @@
 
 ### From source
 ```bash
-go install github.com/sathyanarrayanan/logzip/cmd/logzip@latest
+go install github.com/sourcepirate/logzip/cmd/logzip@latest
 ```
 
 ### Pre-built binary
-Download the latest binary for your platform from the [Releases page](https://github.com/sathyanarrayanan/logzip/releases).
+Download the latest binary for your platform from the [Releases page](https://github.com/sourcepirate/logzip/releases).
 
 ## Quick Start
 

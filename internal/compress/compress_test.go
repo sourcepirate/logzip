@@ -201,3 +201,5 @@ func TestCompressFileRoundTrip(t *testing.T) {
 		t.Fatalf("round trip mismatch:\ngot:  %q\nwant: %q", got, want)
 	}
 }
+
+

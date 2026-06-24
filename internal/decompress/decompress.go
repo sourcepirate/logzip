@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
+	"github.com/sathyanarrayanan/logzip/internal/analyzer"
 	"github.com/sathyanarrayanan/logzip/internal/cli"
 	"github.com/sathyanarrayanan/logzip/internal/format"
 )
@@ -139,14 +141,11 @@ func decompressImpl(r io.Reader, w io.Writer, opts *cli.Options) error {
 		}
 		for col := 0; col < int(headerColCount); col++ {
 			enc := cd.ReadByte()
-			_ = enc
-			valCount := cd.ReadUint32()
-			if int(valCount) != int(lineCount) {
-				skipStrings(cd, int(valCount))
-				continue
-			}
-			for i := 0; i < int(lineCount); i++ {
-				headers[i][col] = cd.ReadString()
+			vals := decodeColumnValues(cd, enc, int(lineCount), &cr.GlobalMeta, -1, col)
+			if len(vals) == int(lineCount) {
+				for i := 0; i < int(lineCount); i++ {
+					headers[i][col] = vals[i]
+				}
 			}
 		}
 
@@ -161,15 +160,12 @@ func decompressImpl(r io.Reader, w io.Writer, opts *cli.Options) error {
 			var rows [][]string
 			for vi := 0; vi < int(varCount); vi++ {
 				enc := cd.ReadByte()
-				_ = enc
+				vals := decodeColumnValues(cd, enc, 0, &cr.GlobalMeta, tid, vi)
 				if vi == 0 {
-					lc := cd.ReadUint32()
-					rows = make([][]string, lc)
-				} else {
-					cd.ReadUint32()
+					rows = make([][]string, len(vals))
 				}
-				for j := 0; j < len(rows); j++ {
-					rows[j] = append(rows[j], cd.ReadString())
+				for j := 0; j < len(rows) && j < len(vals); j++ {
+					rows[j] = append(rows[j], vals[j])
 				}
 			}
 			vars[tid] = &varCols{vals: rows}
@@ -215,6 +211,65 @@ func decompressImpl(r io.Reader, w io.Writer, opts *cli.Options) error {
 		}
 	}
 
+	return nil
+}
+
+func decodeColumnValues(cd *ColumnDecoder, enc byte, expectedCount int, globalMeta *format.GlobalMeta, tid, vi int) []string {
+	switch enc {
+	case format.EncDelta:
+		n := int(cd.ReadUint32())
+		intVals := cd.ReadInt64s()
+		if len(intVals) != n {
+			skipStrings(cd, n)
+			return nil
+		}
+		decoded := analyzer.DeltaDecode(intVals)
+		strs := make([]string, len(decoded))
+		for i, v := range decoded {
+			strs[i] = strconv.FormatInt(v, 10)
+		}
+		return strs
+
+	case format.EncDictID:
+		n := int(cd.ReadUint32())
+		dict := findDict(globalMeta, tid, vi)
+		if dict == nil {
+			skipStrings(cd, n)
+			return nil
+		}
+		strs := make([]string, n)
+		for i := 0; i < n; i++ {
+			idx := int(cd.ReadInt32())
+			if idx >= 0 && idx < len(dict.Entries) {
+				strs[i] = dict.Entries[idx]
+			}
+		}
+		return strs
+
+	default:
+		n := int(cd.ReadUint32())
+		if expectedCount > 0 && n != expectedCount {
+			skipStrings(cd, n)
+			return nil
+		}
+		strs := make([]string, n)
+		for i := 0; i < n; i++ {
+			strs[i] = cd.ReadString()
+		}
+		return strs
+	}
+}
+
+func findDict(gm *format.GlobalMeta, tid, vi int) *format.Dictionary {
+	for i := range gm.Dictionaries {
+		d := &gm.Dictionaries[i]
+		if d.Tag == 1 && int(d.TID) == tid && tid >= 0 {
+			return d
+		}
+		if d.Tag == 0 && tid < 0 && int(d.TID) == vi {
+			return d
+		}
+	}
 	return nil
 }
 
@@ -306,8 +361,20 @@ func (cd *ColumnDecoder) ReadInt32s() []int32 {
 	return vals
 }
 
+func (cd *ColumnDecoder) ReadInt64s() []int64 {
+	n := cd.ReadUint32()
+	vals := make([]int64, n)
+	for i := range vals {
+		v, bytes := binary.Varint(cd.buf[cd.pos:])
+		vals[i] = v
+		cd.pos += bytes
+	}
+	return vals
+}
+
 func skipStrings(cd *ColumnDecoder, n int) {
 	for i := 0; i < n; i++ {
 		cd.ReadString()
 	}
 }
+

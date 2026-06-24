@@ -144,9 +144,9 @@ func compressImpl(r io.Reader, w io.Writer, opts *cli.Options, name string) erro
 		return nil
 	}
 
-	var relations *analyzer.Relations
+	relations := analyzeColumns(meta, hf)
 
-	globalMeta := buildGlobalMeta(hf, meta)
+	globalMeta := buildGlobalMeta(hf, meta, relations)
 	chunkData := encodeChunkWithAnalyzer(meta, 0, len(meta.EIDs), headLen, relations)
 	if name == "" {
 		name = "input.log"
@@ -199,7 +199,7 @@ func compressMultiImpl(paths []string, w io.Writer, opts *cli.Options) error {
 		}
 
 		if allGlobalMeta == nil {
-			allGlobalMeta = buildGlobalMeta(hf, meta)
+			allGlobalMeta = buildGlobalMeta(hf, meta, nil)
 			cw.SetGlobalMeta(allGlobalMeta)
 		}
 
@@ -228,7 +228,7 @@ func compressMultiImpl(paths []string, w io.Writer, opts *cli.Options) error {
 	return cw.Close()
 }
 
-func buildGlobalMeta(hf *parser.HeadFormat, meta *LogMeta) *format.GlobalMeta {
+func buildGlobalMeta(hf *parser.HeadFormat, meta *LogMeta, relations *analyzer.Relations) *format.GlobalMeta {
 	gm := &format.GlobalMeta{}
 
 	if hf != nil {
@@ -262,6 +262,28 @@ func buildGlobalMeta(hf *parser.HeadFormat, meta *LogMeta) *format.GlobalMeta {
 			}
 		}
 		gm.Templates[i] = format.Template{Tokens: toks}
+	}
+
+	if relations != nil {
+		for colIdx, info := range relations.HeaderDict {
+			dict := format.Dictionary{
+				Tag:     0,
+				TID:     uint32(colIdx),
+				Entries: info.Entries,
+			}
+			gm.Dictionaries = append(gm.Dictionaries, dict)
+		}
+		for tid, dicts := range relations.VarDict {
+			for vi, info := range dicts {
+				dict := format.Dictionary{
+					Tag:     1,
+					TID:     uint32(tid),
+					Entries: info.Entries,
+				}
+				_ = vi
+				gm.Dictionaries = append(gm.Dictionaries, dict)
+			}
+		}
 	}
 
 	return gm

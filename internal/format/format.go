@@ -220,9 +220,7 @@ func (cw *ContainerWriter) writeGlobalMeta(buf io.Writer) error {
 	binary.Write(buf, binary.LittleEndian, uint32(len(cw.globalMeta.Dictionaries)))
 	for _, d := range cw.globalMeta.Dictionaries {
 		binary.Write(buf, binary.LittleEndian, d.Tag)
-		if d.Tag == 1 {
-			binary.Write(buf, binary.LittleEndian, d.TID)
-		}
+		binary.Write(buf, binary.LittleEndian, d.TID)
 		binary.Write(buf, binary.LittleEndian, uint32(len(d.Entries)))
 		for _, e := range d.Entries {
 			WriteString(buf, e)
@@ -509,6 +507,10 @@ func (cr *ContainerReader) readGlobalMeta(r io.Reader) error {
 			return err
 		}
 		if d.Tag == 1 {
+			if err := binary.Read(r, binary.LittleEndian, &d.TID); err != nil {
+				return err
+			}
+		} else {
 			if err := binary.Read(r, binary.LittleEndian, &d.TID); err != nil {
 				return err
 			}

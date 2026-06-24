@@ -209,6 +209,7 @@ func IsNumeric(s string) bool {
 	}
 	first := true
 	hasDigit := false
+	dotSeen := false
 	for _, r := range s {
 		if first && (r == '-' || r == '+') {
 			first = false
@@ -216,6 +217,10 @@ func IsNumeric(s string) bool {
 		}
 		first = false
 		if r == '.' {
+			if dotSeen {
+				return false
+			}
+			dotSeen = true
 			continue
 		}
 		if r >= '0' && r <= '9' {

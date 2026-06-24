@@ -92,6 +92,146 @@ func ParseLogs(r io.Reader, headLen int, drainDepth int, st float64) (*parser.He
 	return hf, meta, nil
 }
 
+func analyzeColumns(meta *LogMeta, hf *parser.HeadFormat) *analyzer.Relations {
+	relations := analyzer.NewRelations()
+
+	headLen := int(hf.HeadLength)
+	if headLen == 0 {
+		headLen = 5
+	}
+
+	for col := 0; col < headLen; col++ {
+		colVals := make([]string, 0, len(meta.EIDs))
+		for i := range meta.EIDs {
+			if meta.Headers[i] != nil && col < len(meta.Headers[i]) {
+				colVals = append(colVals, meta.Headers[i][col])
+			}
+		}
+		if len(colVals) < 3 {
+			continue
+		}
+
+		pattern, subFields, _, isDict, dictEntries := analyzer.AnalyzeColumn(colVals, analyzer.MultiplicityThreshold)
+		if isDict {
+			relations.AddHeaderDict(col, dictEntries)
+		} else if pattern != "" && len(subFields) > 0 {
+			relations.AddHeaderPattern(col, pattern)
+			checkDeltaForSubFields(relations, colVals, col, subFields, true)
+		} else {
+			checkDeltaForColumn(relations, colVals, col, true)
+		}
+	}
+
+	for _, tmpl := range meta.Templates {
+		tmplLines, ok := meta.Variables[tmpl.ID]
+		if !ok || len(tmplLines) == 0 {
+			continue
+		}
+		varCount := len(tmpl.VarTokens())
+		for vi := 0; vi < varCount; vi++ {
+			col := make([]string, len(tmplLines))
+			for ri := range tmplLines {
+				if vi < len(tmplLines[ri]) {
+					col[ri] = tmplLines[ri][vi]
+				}
+			}
+			if len(col) < 3 {
+				continue
+			}
+
+			pattern, subFields, _, isDict, dictEntries := analyzer.AnalyzeColumn(col, analyzer.MultiplicityThreshold)
+			if isDict {
+				relations.AddVarDict(tmpl.ID, vi, dictEntries)
+			} else if pattern != "" && len(subFields) > 0 {
+				relations.AddVarPattern(tmpl.ID, vi, pattern)
+				checkDeltaForSubFieldsVar(relations, tmpl.ID, vi, subFields)
+			} else {
+				checkDeltaForColumnVar(relations, tmpl.ID, vi, col)
+			}
+		}
+	}
+
+	return relations
+}
+
+func checkDeltaForColumn(relations *analyzer.Relations, col []string, colIdx int, isHeader bool) {
+	intVals := make([]int64, 0, len(col))
+	for _, v := range col {
+		if v == "" || !analyzer.IsNumeric(v) {
+			return
+		}
+		iv, _ := strconv.ParseInt(v, 10, 64)
+		intVals = append(intVals, iv)
+	}
+	if len(intVals) < 3 {
+		return
+	}
+	if analyzer.ShouldDeltaEncode(intVals) {
+		if isHeader {
+			relations.AddHeaderDiff(colIdx)
+		}
+	}
+}
+
+func checkDeltaForColumnVar(relations *analyzer.Relations, tid, vi int, col []string) {
+	intVals := make([]int64, 0, len(col))
+	for _, v := range col {
+		if v == "" || !analyzer.IsNumeric(v) {
+			return
+		}
+		iv, _ := strconv.ParseInt(v, 10, 64)
+		intVals = append(intVals, iv)
+	}
+	if len(intVals) < 3 {
+		return
+	}
+	if analyzer.ShouldDeltaEncode(intVals) {
+		relations.AddVarDiff(tid, vi)
+	}
+}
+
+func checkDeltaForSubFields(relations *analyzer.Relations, origCol []string, colIdx int, subFields [][]string, isHeader bool) {
+	if len(subFields) == 0 {
+		return
+	}
+	for _, sf := range subFields {
+		intVals := make([]int64, 0, len(sf))
+		for _, v := range sf {
+			if !analyzer.IsNumeric(v) {
+				return
+			}
+			iv, _ := strconv.ParseInt(v, 10, 64)
+			intVals = append(intVals, iv)
+		}
+		if len(intVals) >= 3 && analyzer.ShouldDeltaEncode(intVals) {
+			if isHeader {
+				relations.AddHeaderDiff(colIdx)
+			}
+			return
+		}
+	}
+}
+
+func checkDeltaForSubFieldsVar(relations *analyzer.Relations, tid, vi int, subFields [][]string) {
+	if len(subFields) == 0 {
+		return
+	}
+	for _, sf := range subFields {
+		intVals := make([]int64, 0, len(sf))
+		for _, v := range sf {
+			if !analyzer.IsNumeric(v) {
+				return
+			}
+			iv, _ := strconv.ParseInt(v, 10, 64)
+			intVals = append(intVals, iv)
+		}
+		if len(intVals) >= 3 && analyzer.ShouldDeltaEncode(intVals) {
+			relations.AddVarDiff(tid, vi)
+			return
+		}
+	}
+}
+
 type ColumnEncoder struct {
 	buf *bytes.Buffer
 }
@@ -198,8 +338,9 @@ func (cd *ColumnDecoder) ReadInt64s() []int64 {
 	n := cd.ReadUint32()
 	vals := make([]int64, n)
 	for i := range vals {
-		vals[i], _ = binary.Varint(cd.buf[cd.pos:])
-		cd.pos += binary.Size(vals[i])
+		var bytes int
+		vals[i], bytes = binary.Varint(cd.buf[cd.pos:])
+		cd.pos += bytes
 	}
 	return vals
 }
@@ -272,11 +413,7 @@ func encodeChunkWithAnalyzer(meta *LogMeta, eidStart, eidEnd int, headLen int, r
 				dynCol = append(dynCol, "")
 			}
 		}
-		ce.WriteByte(format.EncRawStr)
-		ce.WriteUint32(uint32(len(dynCol)))
-		for _, v := range dynCol {
-			ce.WriteString(v)
-		}
+		writeColumnWithAnalysis(ce, dynCol, relations, -1, col)
 	}
 
 	ce.WriteUint32(uint32(len(meta.Templates)))
@@ -336,15 +473,27 @@ func writeColumnWithAnalysis(ce *ColumnEncoder, col []string, relations *analyze
 	}
 
 	if relations != nil {
-		if info, ok := relations.VarDict[tid]; ok {
-			if d, ok := info[vi]; ok {
+		if tid < 0 {
+			if info, ok := relations.HeaderDict[vi]; ok {
 				ce.WriteByte(format.EncDictID)
 				ce.WriteUint32(uint32(len(col)))
 				for _, v := range col {
-					idx := int32(d.Mapping[v])
+					idx := int32(info.Mapping[v])
 					ce.WriteInt32(idx)
 				}
 				return
+			}
+		} else {
+			if info, ok := relations.VarDict[tid]; ok {
+				if d, ok := info[vi]; ok {
+					ce.WriteByte(format.EncDictID)
+					ce.WriteUint32(uint32(len(col)))
+					for _, v := range col {
+						idx := int32(d.Mapping[v])
+						ce.WriteInt32(idx)
+					}
+					return
+				}
 			}
 		}
 	}
@@ -372,14 +521,11 @@ func decodeChunk(data []byte, globalMeta *format.GlobalMeta, headLen int) (eids 
 	}
 	for col := 0; col < int(headerColCount); col++ {
 		enc := cd.ReadByte()
-		_ = enc
-		valCount := cd.ReadUint32()
-		if int(valCount) != int(lineCount) {
-			cd.SkipStrings(int(valCount))
-			continue
-		}
-		for i := 0; i < int(lineCount); i++ {
-			headers[i][col] = cd.ReadString()
+		vals := decodeColumnValues(cd, enc, int(lineCount), globalMeta, -1, col)
+		if len(vals) == int(lineCount) {
+			for i := 0; i < int(lineCount); i++ {
+				headers[i][col] = vals[i]
+			}
 		}
 	}
 
@@ -392,27 +538,78 @@ func decodeChunk(data []byte, globalMeta *format.GlobalMeta, headLen int) (eids 
 		var tmplLines [][]string
 		for vi := 0; vi < int(varCount); vi++ {
 			enc := cd.ReadByte()
-			_ = enc
+			vals := decodeColumnValues(cd, enc, 0, globalMeta, tid, vi)
 			if vi == 0 {
-				linesCount = cd.ReadUint32()
-			} else {
-				cd.ReadUint32()
-			}
-			col := make([]string, linesCount)
-			for j := 0; j < int(linesCount); j++ {
-				col[j] = cd.ReadString()
-			}
-			if vi == 0 {
+				linesCount = uint32(len(vals))
 				tmplLines = make([][]string, linesCount)
 			}
-			for j := 0; j < int(linesCount); j++ {
-				tmplLines[j] = append(tmplLines[j], col[j])
+			for j := 0; j < int(linesCount) && j < len(vals); j++ {
+				tmplLines[j] = append(tmplLines[j], vals[j])
 			}
 		}
 		vars[tid] = tmplLines
 	}
 
 	return eids, headers, vars, nil
+}
+
+func decodeColumnValues(cd *ColumnDecoder, enc byte, expectedCount int, globalMeta *format.GlobalMeta, tid, vi int) []string {
+	switch enc {
+	case format.EncDelta:
+		n := int(cd.ReadUint32())
+		intVals := cd.ReadInt64s()
+		if len(intVals) != n {
+			cd.SkipStrings(n)
+			return nil
+		}
+		decoded := analyzer.DeltaDecode(intVals)
+		strs := make([]string, len(decoded))
+		for i, v := range decoded {
+			strs[i] = strconv.FormatInt(v, 10)
+		}
+		return strs
+
+	case format.EncDictID:
+		n := int(cd.ReadUint32())
+		dict := findDict(globalMeta, tid, vi)
+		if dict == nil {
+			cd.SkipStrings(n)
+			return nil
+		}
+		strs := make([]string, n)
+		for i := 0; i < n; i++ {
+			idx := int(cd.ReadInt32())
+			if idx >= 0 && idx < len(dict.Entries) {
+				strs[i] = dict.Entries[idx]
+			}
+		}
+		return strs
+
+	default:
+		n := int(cd.ReadUint32())
+		if expectedCount > 0 && n != expectedCount {
+			cd.SkipStrings(n)
+			return nil
+		}
+		strs := make([]string, n)
+		for i := 0; i < n; i++ {
+			strs[i] = cd.ReadString()
+		}
+		return strs
+	}
+}
+
+func findDict(gm *format.GlobalMeta, tid, vi int) *format.Dictionary {
+	for i := range gm.Dictionaries {
+		d := &gm.Dictionaries[i]
+		if d.Tag == 1 && int(d.TID) == tid && tid >= 0 {
+			return d
+		}
+		if d.Tag == 0 && tid < 0 && int(d.TID) == vi {
+			return d
+		}
+	}
+	return nil
 }
 
 func (cd *ColumnDecoder) ReadByte() byte {
