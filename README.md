@@ -1,6 +1,5 @@
 # logzip
 
-> Log-specialized lossless compressor based on the LogShrink algorithm
 
 [![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
